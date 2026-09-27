@@ -1,0 +1,29 @@
+# Proteções do workspace. Código e recibos leves entram no Git.
+.DS_Store
+**/.DS_Store
+.aiox/
+**/.aiox/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.log
+.venv/
+**/node_modules/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+
+# Regenerado por rodada; não é o acervo.
+evidence/runs/
+evidence/browser/
+evidence/validation/
+incoming/
+runs/
+originals/*.apk
+originals/*.xapk
+originals/*.apks
+originals/*.apkm
+originals/*.obb
