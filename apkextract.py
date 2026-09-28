@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Safe unpack of APK / XAPK / APKS / APKM for studio libraries.
 
-Nested APKs and ZIP OBBs are opened. DEX, ELF/.so and signing files are omitted.
+Every file of the package is kept: nested APKs and ZIP OBBs are opened, and DEX,
+ELF/.so, signing files and non-ZIP OBBs are copied as they are. The original package
+is stored next to the tree (`original/`), split into parts under the Git LFS file
+limit when it is larger. `--resources-only` leaves code and signatures out.
 The original package is never modified. Destinations refuse traversal, absolute
 paths, colliding names and a second write over an existing tree.
 """
@@ -27,6 +30,7 @@ PACKAGE_SUFFIXES = {".apk", ".xapk", ".apks", ".apkm"}
 ELF_MAGIC = b"\x7fELF"
 DEX_NAME = re.compile(r"(^|/)classes\d*\.dex$", re.IGNORECASE)
 SO_NAME = re.compile(r"(^|/)lib/[^/]+/[^/]+\.so$", re.IGNORECASE)
+PART_SIZE = 1_900_000_000  # under the 2 GB per-file limit of Git LFS on GitHub Free and Pro
 
 
 class ExtractError(ValueError):
@@ -116,11 +120,9 @@ def is_native_or_code(name: str) -> bool:
     return bool(DEX_NAME.search(posix) or SO_NAME.search(posix))
 
 
-def is_apk_resource(name: str, skip_native: bool = True) -> bool:
+def is_apk_resource(name: str, skip_native: bool = False) -> bool:
     posix = name.replace("\\", "/")
-    if is_signature_entry(posix):
-        return False
-    if skip_native and is_native_or_code(posix):
+    if skip_native and (is_signature_entry(posix) or is_native_or_code(posix)):
         return False
     return True
 
@@ -130,7 +132,11 @@ def nested_zip(archive: zipfile.ZipFile, name: str):
     with archive.open(name) as src:
         shutil.copyfileobj(src, tmp, 1024 * 1024)
     tmp.seek(0)
-    return zipfile.ZipFile(tmp), tmp
+    try:
+        return zipfile.ZipFile(tmp), tmp
+    except zipfile.BadZipFile:
+        tmp.close()
+        raise
 
 
 def copy_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, dest: Path, skip_native: bool) -> tuple[bool, bytes]:
@@ -162,7 +168,7 @@ def extract_members(archive: zipfile.ZipFile, dest_root: Path, prefix: str, skip
             continue
         label = f"{prefix}{info.filename}" if prefix else info.filename
         if not is_apk_resource(info.filename, skip_native=skip_native):
-            skipped.append({"path": label, "reason": "código nativo, DEX ou assinatura"})
+            skipped.append({"path": label, "reason": "código ou assinatura (--resources-only)"})
             continue
         dest = dest_root.joinpath(*PurePosixPath(info.filename).parts)
         if not dest.resolve().is_relative_to(dest_root):
@@ -302,8 +308,57 @@ def describe(extracted_root) -> dict:
     }
 
 
-def unpack(source, dest, *, skip_native: bool = True, apk_stem: str | None = None) -> dict:
-    """Unpack a package into a new directory. Nested APK blobs stay uncopied."""
+def store_original(source: Path, dest: Path, part_size: int = PART_SIZE) -> dict:
+    """Copy the package into `dest`; above `part_size`, as numbered parts with a SHA-256 each."""
+    source = Path(source)
+    dest.mkdir(parents=True)
+    size = source.stat().st_size
+    record = {"name": source.name, "bytes": size, "sha256": digest(source), "parts": []}
+    if size <= part_size:
+        shutil.copyfile(source, dest / source.name)
+    else:
+        with source.open("rb") as stream:
+            for index in range(1, (size + part_size - 1) // part_size + 1):
+                part = dest / f"{source.name}.part{index:02d}"
+                with part.open("xb") as out:
+                    left = part_size
+                    while left:
+                        chunk = stream.read(min(left, 1024 * 1024))
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        left -= len(chunk)
+                record["parts"].append({"file": part.name, "bytes": part.stat().st_size, "sha256": digest(part)})
+    (dest / "original.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return record
+
+
+def join_original(original_dir, out) -> dict:
+    """Rebuild a split original from its parts and check every SHA-256."""
+    original_dir = Path(original_dir).expanduser().resolve(strict=True)
+    record = json.loads((original_dir / "original.json").read_text(encoding="utf-8"))
+    out = Path(out).expanduser()
+    if out.exists():
+        raise FileExistsError(out)
+    if not record["parts"]:
+        shutil.copyfile(original_dir / record["name"], out)
+    else:
+        with out.open("xb") as target:
+            for part in record["parts"]:
+                path = original_dir / part["file"]
+                if digest(path) != part["sha256"]:
+                    raise ExtractError(f"parte com SHA-256 diferente: {part['file']}")
+                with path.open("rb") as stream:
+                    shutil.copyfileobj(stream, target, 1024 * 1024)
+    if digest(out) != record["sha256"]:
+        out.unlink()
+        raise ExtractError("pacote remontado com SHA-256 diferente do original")
+    return {"name": record["name"], "sha256": record["sha256"], "bytes": record["bytes"], "out": portable_path(out)}
+
+
+def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = True, part_size: int = PART_SIZE,
+           apk_stem: str | None = None) -> dict:
+    """Unpack a package into a new directory, with every file and the original beside it."""
     source = Path(source).expanduser().resolve(strict=True)
     dest = Path(dest).expanduser()
     if dest.exists():
@@ -362,7 +417,9 @@ def unpack(source, dest, *, skip_native: bool = True, apk_stem: str | None = Non
                             extracted.extend(inner_extracted)
                             skipped.extend(inner_skipped)
                         except zipfile.BadZipFile:
-                            skipped.append({"path": name, "reason": "OBB não é ZIP; não copiado como blob"})
+                            target = dest_root / PurePosixPath(name).name
+                            copy_zip_entry(archive, info, target, skip_native=False)
+                            extracted.append(name)
                         continue
                     target = dest.joinpath(*PurePosixPath(name).parts)
                     if not target.resolve().is_relative_to(dest.resolve()):
@@ -379,6 +436,11 @@ def unpack(source, dest, *, skip_native: bool = True, apk_stem: str | None = Non
                         skipped.append({"path": name, "reason": f"executável {magic[:4]!r}"})
                         continue
                     extracted.append(name)
+        original = None
+        if keep_original:
+            if (dest / "original").exists():
+                raise ExtractError("o pacote já traz uma pasta original/ na raiz")
+            original = store_original(source, dest / "original", part_size)
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
         raise
@@ -391,6 +453,7 @@ def unpack(source, dest, *, skip_native: bool = True, apk_stem: str | None = Non
         "extracted": extracted,
         "skipped": skipped,
         "layout": layout,
+        "original": original,
         "extensions": dict(Counter(PurePosixPath(name.split("!/")[-1]).suffix.lower() or "[none]" for name in extracted).most_common()),
     }
     (dest / "layout.json").write_text(json.dumps({
@@ -398,6 +461,7 @@ def unpack(source, dest, *, skip_native: bool = True, apk_stem: str | None = Non
         "sha256": report["sha256"],
         "identity": identity,
         "layout": layout,
+        "original": original,
         "extracted": len(extracted),
         "skipped": len(skipped),
     }, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -412,6 +476,11 @@ def main() -> int:
     unpack_cmd = commands.add_parser("unpack")
     unpack_cmd.add_argument("package")
     unpack_cmd.add_argument("--out", required=True, type=Path)
+    unpack_cmd.add_argument("--resources-only", action="store_true", help="deixa DEX, .so e assinaturas de fora")
+    unpack_cmd.add_argument("--no-original", action="store_true", help="não guarda o pacote original em original/")
+    join_cmd = commands.add_parser("join", help="remonta um original dividido em partes e confere o SHA-256")
+    join_cmd.add_argument("original_dir")
+    join_cmd.add_argument("--out", required=True, type=Path)
     layout_cmd = commands.add_parser("layout")
     layout_cmd.add_argument("extracted")
     args = parser.parse_args()
@@ -419,14 +488,17 @@ def main() -> int:
         if args.command == "inspect":
             print(json.dumps(inspect(args.package), ensure_ascii=False, indent=2))
         elif args.command == "unpack":
-            report = unpack(args.package, args.out)
+            report = unpack(args.package, args.out, skip_native=args.resources_only, keep_original=not args.no_original)
             print(json.dumps({
                 "extracted": len(report["extracted"]),
                 "skipped": len(report["skipped"]),
                 "primaryResourceRoot": report["layout"]["primaryResourceRoot"],
                 "apks": report["layout"]["apks"],
+                "original": report["original"] and {"sha256": report["original"]["sha256"], "parts": len(report["original"]["parts"])},
                 "out": portable_path(args.out),
             }, ensure_ascii=False, indent=2))
+        elif args.command == "join":
+            print(json.dumps(join_original(args.original_dir, args.out), ensure_ascii=False, indent=2))
         else:
             print(json.dumps(describe(args.extracted), ensure_ascii=False, indent=2))
     except (OSError, ExtractError, zipfile.BadZipFile, FileExistsError) as exc:

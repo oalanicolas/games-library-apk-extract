@@ -8,7 +8,7 @@ Uma biblioteca do estúdio entrega um APK/XAPK obtido legitimamente e recebe uma
 ## Fonte e contexto
 - Projeto/ID: `apk-extract`; módulo `library-apk-extract`.
 - Registro canônico: skill `game-library-studio` (security-and-publishing) e a bancada `libraries/android-asset-workspace`.
-- Modo: ferramenta de estudo. Pacotes de terceiros não entram neste repositório.
+- Modo: ferramenta. Os pacotes ficam na bancada Android; este repositório guarda o extrator.
 - Raízes autorizadas de leitura: o arquivo informado na chamada.
 - Raízes autorizadas de escrita: o `--out` informado; nunca o pacote de origem.
 - Autoridade para publicar: nenhuma nesta rodada.
