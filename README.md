@@ -1,6 +1,8 @@
 # Extração de APK
 
-Módulo local para **abrir APK, XAPK, APKS e APKM** e obter os recursos acessíveis. O original não é alterado. DEX, bibliotecas `.so` e assinaturas ficam de fora. A bancada com originais, `runs/` e viewer continua em `libraries/android-asset-workspace`.
+Módulo local para **abrir APK, XAPK, APKS e APKM** e guardar 100% do pacote: recursos, DEX, bibliotecas `.so`, assinaturas, OBB e o original. O original não é alterado. A bancada com originais, `runs/` e viewer está em `libraries/android-asset-workspace`; a cópia completa de cada jogo vai para `libraries/<jogo>/`, com Git LFS nos arquivos grandes.
+
+`--resources-only` deixa código e assinaturas de fora; `--no-original` não copia o pacote. Original acima de 1,9 GB sai em partes com SHA-256, abaixo do limite de 2 GB por arquivo do Git LFS no GitHub; `python3 apkextract.py join <out>/original --out jogo.xapk` remonta e confere.
 
 ## Abrir um pacote
 
@@ -17,7 +19,8 @@ out/
   layout.json
   manifest.json          # se o pacote for XAPK
   apk/<stem>/            # cada APK interno, já aberto
-  obb/<stem>/            # OBB ZIP, se houver
+  obb/<stem>/            # OBB aberto, ou o arquivo como veio se não for ZIP
+  original/              # o pacote, ou as partes .partNN, e original.json com os SHA-256
 ```
 
 `layout.primaryResourceRoot` aponta a pasta de conteúdo do jogo (`assets/` com `csv_logic`, Addressables `aa/`, ou Unity `bin/Data`).

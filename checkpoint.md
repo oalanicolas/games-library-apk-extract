@@ -14,4 +14,4 @@ Estado: concluído (G0–G1 local).
 Commit inicial neste módulo; remoto GitHub e gitlink no hub só com pedido de push.
 
 ## Preservação
-Originais comerciais fora deste Git. Sem push nesta rodada.
+O extrator nunca altera o original. A cópia completa do pacote (extração e original) vai para a biblioteca de cada jogo, pelo Git LFS nos arquivos grandes.
