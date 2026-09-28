@@ -96,15 +96,15 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(layout["primaryResourceRoot"], "apk/install_time_asset_pack/assets")
         self.assertEqual((dest / "apk/install_time_asset_pack/assets/csv_logic/characters.csv").read_bytes(), b"Name\nShotgunGirl\n")
         self.assertEqual(report["skipped"], [])
-        self.assertEqual(report["original"]["sha256"], apkextract.digest(xapk))
-        self.assertEqual((dest / "original" / "game.xapk").read_bytes(), xapk.read_bytes())
+        self.assertIsNone(report["original"])
+        self.assertFalse((dest / "original").exists())
         with self.assertRaises(FileExistsError):
             apkextract.unpack(xapk, dest)
 
     def test_resources_only_leaves_code_out(self):
         apk = self.make_apk(self.root / "solo.apk")
         dest = self.root / "res-only"
-        report = apkextract.unpack(apk, dest, skip_native=True, keep_original=False)
+        report = apkextract.unpack(apk, dest, skip_native=True)
         self.assertFalse((dest / "apk/solo/classes.dex").exists())
         self.assertFalse((dest / "apk/solo/lib/arm64-v8a/libg.so").exists())
         self.assertFalse((dest / "apk/solo/META-INF/CERT.SF").exists())
@@ -115,7 +115,7 @@ class ExtractTests(unittest.TestCase):
     def test_original_split_in_parts_and_joined(self):
         xapk = self.make_xapk()
         dest = self.root / "split"
-        report = apkextract.unpack(xapk, dest, part_size=700)
+        report = apkextract.unpack(xapk, dest, keep_original=True, part_size=700)
         parts = report["original"]["parts"]
         self.assertGreater(len(parts), 1)
         self.assertTrue(all(row["bytes"] <= 700 for row in parts))
@@ -135,7 +135,7 @@ class ExtractTests(unittest.TestCase):
             archive.write(self.make_apk(self.root / "base.apk"), "base.apk")
             archive.writestr("Android/obb/com.example.obb/main.1.com.example.obb.obb", b"RAWPAK\0data")
         dest = self.root / "obb-out"
-        apkextract.unpack(xapk, dest, keep_original=False)
+        apkextract.unpack(xapk, dest)
         self.assertEqual((dest / "obb/main.1.com.example.obb/main.1.com.example.obb.obb").read_bytes(), b"RAWPAK\0data")
 
     def test_plain_apk(self):

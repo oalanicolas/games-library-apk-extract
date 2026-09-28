@@ -14,4 +14,4 @@ Estado: concluído (G0–G1 local).
 Commit inicial neste módulo; remoto GitHub e gitlink no hub só com pedido de push.
 
 ## Preservação
-O extrator nunca altera o original. A cópia completa do pacote (extração e original) vai para a biblioteca de cada jogo, pelo Git LFS nos arquivos grandes.
+O extrator nunca altera o original. A extração de cada jogo vai para a biblioteca dele, pelo Git LFS nos arquivos grandes; o pacote original fica na bancada.

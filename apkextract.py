@@ -2,9 +2,9 @@
 """Safe unpack of APK / XAPK / APKS / APKM for studio libraries.
 
 Every file of the package is kept: nested APKs and ZIP OBBs are opened, and DEX,
-ELF/.so, signing files and non-ZIP OBBs are copied as they are. The original package
-is stored next to the tree (`original/`), split into parts under the Git LFS file
-limit when it is larger. `--resources-only` leaves code and signatures out.
+ELF/.so, signing files and non-ZIP OBBs are copied as they are. The package itself
+is not copied; `--with-original` stores it in `original/`, split into parts under the
+Git LFS file limit when it is larger. `--resources-only` leaves code and signatures out.
 The original package is never modified. Destinations refuse traversal, absolute
 paths, colliding names and a second write over an existing tree.
 """
@@ -356,9 +356,9 @@ def join_original(original_dir, out) -> dict:
     return {"name": record["name"], "sha256": record["sha256"], "bytes": record["bytes"], "out": portable_path(out)}
 
 
-def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = True, part_size: int = PART_SIZE,
+def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = False, part_size: int = PART_SIZE,
            apk_stem: str | None = None) -> dict:
-    """Unpack a package into a new directory, with every file and the original beside it."""
+    """Unpack every file of a package into a new directory; the package itself only with keep_original."""
     source = Path(source).expanduser().resolve(strict=True)
     dest = Path(dest).expanduser()
     if dest.exists():
@@ -477,7 +477,7 @@ def main() -> int:
     unpack_cmd.add_argument("package")
     unpack_cmd.add_argument("--out", required=True, type=Path)
     unpack_cmd.add_argument("--resources-only", action="store_true", help="deixa DEX, .so e assinaturas de fora")
-    unpack_cmd.add_argument("--no-original", action="store_true", help="não guarda o pacote original em original/")
+    unpack_cmd.add_argument("--with-original", action="store_true", help="guarda também o pacote em original/")
     join_cmd = commands.add_parser("join", help="remonta um original dividido em partes e confere o SHA-256")
     join_cmd.add_argument("original_dir")
     join_cmd.add_argument("--out", required=True, type=Path)
@@ -488,7 +488,7 @@ def main() -> int:
         if args.command == "inspect":
             print(json.dumps(inspect(args.package), ensure_ascii=False, indent=2))
         elif args.command == "unpack":
-            report = unpack(args.package, args.out, skip_native=args.resources_only, keep_original=not args.no_original)
+            report = unpack(args.package, args.out, skip_native=args.resources_only, keep_original=args.with_original)
             print(json.dumps({
                 "extracted": len(report["extracted"]),
                 "skipped": len(report["skipped"]),
