@@ -84,10 +84,12 @@ def archive_members(archive: zipfile.ZipFile, require: str | None = None) -> lis
         mode = (info.external_attr >> 16) & 0xFFFF
         if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
             raise ExtractError(f"entrada ZIP não regular: {name!r}")
-        key = unicodedata.normalize("NFC", name.rstrip("/")).casefold()
-        if key in seen:
+        # Só o nome idêntico é conflito: nomes que diferem apenas em caixa/NFC (ofuscação de
+        # recursos, `res/-B.xml` e `res/-b.xml`) são legítimos no ZIP e ganham destino próprio
+        # na extração (`case_aliases`).
+        if name.rstrip("/") in seen:
             raise ExtractError(f"nomes ZIP em conflito: {name!r}")
-        seen.add(key)
+        seen.add(name.rstrip("/"))
         if info.file_size > MAX_FILE:
             raise ExtractError(f"arquivo ZIP grande demais: {name!r}")
         total += info.file_size
@@ -103,6 +105,35 @@ def archive_members(archive: zipfile.ZipFile, require: str | None = None) -> lis
         if not has_manifest and not has_apk:
             raise ExtractError("XAPK sem manifest.json nem APK interno")
     return infos
+
+
+def case_aliases(infos) -> dict[str, str]:
+    """Destino de cada entrada cujo nome colide, sem distinguir caixa, com uma anterior do ZIP.
+
+    A primeira entrada (ordem do ZIP) mantém o nome; as seguintes viram `<nome>~caseN<ext>`. Sem isso, o
+    APFS (e o Windows) sobrescreveria uma com a outra. O mapa vai para o relatório da extração."""
+    used: set[str] = set()
+    for info in infos:
+        used.add(unicodedata.normalize("NFC", info.filename.rstrip("/")).casefold())
+    taken: set[str] = set()
+    aliases: dict[str, str] = {}
+    for info in infos:
+        name = info.filename
+        key = unicodedata.normalize("NFC", name.rstrip("/")).casefold()
+        if key not in taken:
+            taken.add(key)
+            continue
+        posix = PurePosixPath(name)
+        number = 2
+        while True:
+            candidate = str(posix.with_name(f"{posix.stem}~case{number}{posix.suffix}"))
+            candidate_key = unicodedata.normalize("NFC", candidate).casefold()
+            if candidate_key not in used and candidate_key not in taken:
+                break
+            number += 1
+        taken.add(candidate_key)
+        aliases[name] = candidate
+    return aliases
 
 
 def is_signature_entry(name: str) -> bool:
@@ -159,18 +190,24 @@ def copy_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, dest: Path, 
     return True, magic
 
 
-def extract_members(archive: zipfile.ZipFile, dest_root: Path, prefix: str, skip_native: bool) -> tuple[list[str], list[dict]]:
+def extract_members(archive: zipfile.ZipFile, dest_root: Path, prefix: str, skip_native: bool,
+                    renamed: list[dict] | None = None) -> tuple[list[str], list[dict]]:
     extracted: list[str] = []
     skipped: list[dict] = []
     dest_root = dest_root.resolve()
-    for info in archive.infolist():
+    infos = archive.infolist()
+    aliases = case_aliases(infos)
+    for info in infos:
         if info.is_dir():
             continue
         label = f"{prefix}{info.filename}" if prefix else info.filename
         if not is_apk_resource(info.filename, skip_native=skip_native):
             skipped.append({"path": label, "reason": "código ou assinatura (--resources-only)"})
             continue
-        dest = dest_root.joinpath(*PurePosixPath(info.filename).parts)
+        target_name = aliases.get(info.filename, info.filename)
+        if renamed is not None and target_name != info.filename:
+            renamed.append({"path": label, "extracted_as": f"{prefix}{target_name}" if prefix else target_name})
+        dest = dest_root.joinpath(*PurePosixPath(target_name).parts)
         if not dest.resolve().is_relative_to(dest_root):
             skipped.append({"path": label, "reason": "destino fora da extração"})
             continue
@@ -367,6 +404,7 @@ def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = Fal
     dest.mkdir(parents=True)
     extracted: list[str] = []
     skipped: list[dict] = []
+    renamed: list[dict] = []
     identity: dict = {}
     try:
         with zipfile.ZipFile(source) as archive:
@@ -377,7 +415,7 @@ def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = Fal
             if kind == "apk":
                 dest_root = dest / "apk" / (apk_stem or source.stem)
                 dest_root.mkdir(parents=True)
-                inner_extracted, inner_skipped = extract_members(archive, dest_root, prefix="", skip_native=skip_native)
+                inner_extracted, inner_skipped = extract_members(archive, dest_root, prefix="", skip_native=skip_native, renamed=renamed)
                 extracted.extend(inner_extracted)
                 skipped.extend(inner_skipped)
             else:
@@ -393,7 +431,7 @@ def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = Fal
                         try:
                             archive_members(nested, require="apk")
                             inner_extracted, inner_skipped = extract_members(
-                                nested, dest_root, prefix=f"{name}!/", skip_native=skip_native
+                                nested, dest_root, prefix=f"{name}!/", skip_native=skip_native, renamed=renamed
                             )
                         finally:
                             nested.close()
@@ -409,7 +447,7 @@ def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = Fal
                             try:
                                 archive_members(nested)
                                 inner_extracted, inner_skipped = extract_members(
-                                    nested, dest_root, prefix=f"{name}!/", skip_native=skip_native
+                                    nested, dest_root, prefix=f"{name}!/", skip_native=skip_native, renamed=renamed
                                 )
                             finally:
                                 nested.close()
@@ -452,6 +490,7 @@ def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = Fal
         "identity": identity,
         "extracted": extracted,
         "skipped": skipped,
+        "renamed": renamed,
         "layout": layout,
         "original": original,
         "extensions": dict(Counter(PurePosixPath(name.split("!/")[-1]).suffix.lower() or "[none]" for name in extracted).most_common()),
@@ -464,6 +503,7 @@ def unpack(source, dest, *, skip_native: bool = False, keep_original: bool = Fal
         "original": original,
         "extracted": len(extracted),
         "skipped": len(skipped),
+        "renamed": len(renamed),
     }, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
